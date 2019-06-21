@@ -5,7 +5,7 @@
     #if defined _MSC_VER
         #define DEEPSPEECH_EXPORT extern "C" __declspec(dllexport) 
     #else                                                                   /*End of _MSC_VER*/  
-        #define DEEPSPEECH_EXPORT __attribute__ ((visibility("default")))
+        #define DEEPSPEECH_EXPORT extern "C" __attribute__ ((visibility("default")))
 #endif                                                                      /*End of SWIG*/  
 #else
     #define DEEPSPEECH_EXPORT
@@ -52,6 +52,7 @@ enum DeepSpeech_Error_Codes
     DS_ERR_FAIL_CREATE_STREAM = 0x3004,
     DS_ERR_FAIL_READ_PROTOBUF = 0x3005,
     DS_ERR_FAIL_CREATE_SESS   = 0x3006,
+    DS_ERR_FAIL_CREATE_MODEL  = 0x3007,
 };
 
 /**

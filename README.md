@@ -90,15 +90,15 @@ Please refer to your system's documentation on how to install these dependencies
 
 ### CUDA dependency
 
-The GPU capable builds (Python, NodeJS, C++, etc) depend on the same CUDA runtime as upstream TensorFlow. Make sure you've installed the correct version of CUDA
+The GPU capable builds (Python, NodeJS, C++, etc) depend on the same CUDA runtime as upstream TensorFlow. Currently with TensorFlow 1.13 it depends on CUDA 10.0 and CuDNN v7.5.
 
 ### Getting the pre-trained model
 
 If you want to use the pre-trained English model for performing speech-to-text, you can download it (along with other important inference material) from the DeepSpeech [releases page](https://github.com/mozilla/DeepSpeech/releases). Alternatively, you can run the following command to download and unzip the model files in your current directory:
 
 ```bash
-wget https://github.com/mozilla/DeepSpeech/releases/download/v0.4.1/deepspeech-0.4.1-models.tar.gz
-tar xvfz deepspeech-0.4.1-models.tar.gz
+wget https://github.com/mozilla/DeepSpeech/releases/download/v0.5.1/deepspeech-0.5.1-models.tar.gz
+tar xvfz deepspeech-0.5.1-models.tar.gz
 ```
 
 ### Model compatibility
@@ -343,7 +343,7 @@ Refer to the corresponding [README.md](native_client/README.md) for information 
 
 ### Exporting a model for TFLite
 
-If you want to experiment with the TF Lite engine, you need to export a model that is compatible with it, then use the `--nouse_seq_length --export_tflite` flags. If you already have a trained model, you can re-export it for TFLite by running `DeepSpeech.py` again and specifying the same `checkpoint_dir` that you used for training, as well as passing `--nouse_seq_length --export_tflite --export_dir /model/export/destination`.
+If you want to experiment with the TF Lite engine, you need to export a model that is compatible with it, then use the `--export_tflite` flags. If you already have a trained model, you can re-export it for TFLite by running `DeepSpeech.py` again and specifying the same `checkpoint_dir` that you used for training, as well as passing `--export_tflite --export_dir /model/export/destination`.
 
 ### Making a mmap-able model for inference
 
