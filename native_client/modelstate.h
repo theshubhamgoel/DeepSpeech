@@ -8,18 +8,15 @@
 
 #include "ctcdecode/scorer.h"
 #include "ctcdecode/output.h"
-#include "ctcdecode/decoderstate.h"
+
+class DecoderState;
 
 struct ModelState {
   //TODO: infer batch size from model/use dynamic batch size
   static constexpr unsigned int BATCH_SIZE = 1;
 
-  static constexpr unsigned int DEFAULT_SAMPLE_RATE = 16000;
-  static constexpr unsigned int DEFAULT_WINDOW_LENGTH = DEFAULT_SAMPLE_RATE * 0.032;
-  static constexpr unsigned int DEFAULT_WINDOW_STEP = DEFAULT_SAMPLE_RATE * 0.02;
-
-  Alphabet* alphabet_;
-  Scorer* scorer_;
+  Alphabet alphabet_;
+  std::shared_ptr<Scorer> scorer_;
   unsigned int beam_width_;
   unsigned int n_steps_;
   unsigned int n_context_;
@@ -33,11 +30,7 @@ struct ModelState {
   ModelState();
   virtual ~ModelState();
 
-  virtual int init(const char* model_path,
-                   unsigned int n_features,
-                   unsigned int n_context,
-                   const char* alphabet_path,
-                   unsigned int beam_width);
+  virtual int init(const char* model_path);
 
   virtual void compute_mfcc(const std::vector<float>& audio_buffer, std::vector<float>& mfcc_output) = 0;
 
@@ -65,29 +58,22 @@ struct ModelState {
    *
    * @param state Decoder state to use when decoding.
    *
-   * @return Vector of Output structs directly from the CTC decoder for additional processing.
-   */
-  virtual std::vector<Output> decode_raw(DecoderState* state);
-
-  /**
-   * @brief Perform decoding of the logits, using basic CTC decoder or
-   *        CTC decoder with KenLM enabled
-   *
-   * @param state Decoder state to use when decoding.
-   *
    * @return String representing the decoded text.
    */
-  virtual char* decode(DecoderState* state);
+  virtual char* decode(const DecoderState& state) const;
 
   /**
    * @brief Return character-level metadata including letter timings.
    *
    * @param state Decoder state to use when decoding.
+   * @param num_results Maximum number of candidate results to return.
    *
-   * @return Metadata struct containing MetadataItem structs for each character.
-   * The user is responsible for freeing Metadata by calling DS_FreeMetadata().
+   * @return A Metadata struct containing CandidateTranscript structs.
+   * Each represents an candidate transcript, with the first ranked most probable.
+   * The user is responsible for freeing Result by calling DS_FreeMetadata().
    */
-  virtual Metadata* decode_metadata(DecoderState* state);
+  virtual Metadata* decode_metadata(const DecoderState& state,
+                                    size_t num_results);
 };
 
 #endif // MODELSTATE_H

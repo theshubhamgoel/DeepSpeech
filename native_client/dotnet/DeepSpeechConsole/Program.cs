@@ -21,67 +21,46 @@ namespace CSharpExamples
         static string GetArgument(IEnumerable<string> args, string option)
         => args.SkipWhile(i => i != option).Skip(1).Take(1).FirstOrDefault();
 
-        static string MetadataToString(Metadata meta)
+        static string MetadataToString(CandidateTranscript transcript)
         {
             var nl = Environment.NewLine;
             string retval =
-             Environment.NewLine + $"Recognized text: {string.Join("", meta?.Items?.Select(x => x.Character))} {nl}"
-             + $"Prob: {meta?.Probability} {nl}"
-             + $"Item count: {meta?.Items?.Length} {nl}"
-             + string.Join(nl, meta?.Items?.Select(x => $"Timestep : {x.Timestep} TimeOffset: {x.StartTime} Char: {x.Character}"));
+             Environment.NewLine + $"Recognized text: {string.Join("", transcript?.Tokens?.Select(x => x.Text))} {nl}"
+             + $"Confidence: {transcript?.Confidence} {nl}"
+             + $"Item count: {transcript?.Tokens?.Length} {nl}"
+             + string.Join(nl, transcript?.Tokens?.Select(x => $"Timestep : {x.Timestep} TimeOffset: {x.StartTime} Char: {x.Text}"));
             return retval;
         }
 
         static void Main(string[] args)
         {
             string model = null;
-            string alphabet = null;
-            string lm = null;
-            string trie = null;
+            string scorer = null;
             string audio = null;
             bool extended = false;
             if (args.Length > 0)
             {
                 model = GetArgument(args, "--model");
-                alphabet = GetArgument(args, "--alphabet");
-                lm = GetArgument(args, "--lm");
-                trie = GetArgument(args, "--trie");
+                scorer = GetArgument(args, "--scorer");
                 audio = GetArgument(args, "--audio");
                 extended = !string.IsNullOrWhiteSpace(GetArgument(args, "--extended"));
             }
 
-            const uint N_CEP = 26;
-            const uint N_CONTEXT = 9;
-            const uint BEAM_WIDTH = 500;
-            const float LM_ALPHA = 0.75f;
-            const float LM_BETA = 1.85f;
-
             Stopwatch stopwatch = new Stopwatch();
-
-            using (IDeepSpeech sttClient = new DeepSpeech())
+            try
             {
-                try
+                Console.WriteLine("Loading model...");
+                stopwatch.Start();
+                using (IDeepSpeech sttClient = new DeepSpeech(model ?? "output_graph.pbmm"))
                 {
-                    Console.WriteLine("Loading model...");
-                    stopwatch.Start();
-                    sttClient.CreateModel(
-                        model ?? "output_graph.pbmm",
-                        N_CEP, N_CONTEXT,
-                        alphabet ?? "alphabet.txt",
-                        BEAM_WIDTH);
                     stopwatch.Stop();
 
                     Console.WriteLine($"Model loaded - {stopwatch.Elapsed.Milliseconds} ms");
                     stopwatch.Reset();
-                    if (lm != null)
+                    if (scorer != null)
                     {
-                        Console.WriteLine("Loadin LM...");
-                        sttClient.EnableDecoderWithLM(
-                            alphabet ?? "alphabet.txt",
-                            lm ?? "lm.binary",
-                            trie ?? "trie",
-                            LM_ALPHA, LM_BETA);
-
+                        Console.WriteLine("Loading scorer...");
+                        sttClient.EnableExternalScorer(scorer ?? "kenlm.scorer");
                     }
 
                     string audioFile = audio ?? "arctic_a0024.wav";
@@ -95,12 +74,14 @@ namespace CSharpExamples
                         string speechResult;
                         if (extended)
                         {
-                            Metadata metaResult = sttClient.SpeechToTextWithMetadata(waveBuffer.ShortBuffer, Convert.ToUInt32(waveBuffer.MaxSize / 2), 16000);
-                            speechResult = MetadataToString(metaResult);
+                            Metadata metaResult = sttClient.SpeechToTextWithMetadata(waveBuffer.ShortBuffer,
+                                Convert.ToUInt32(waveBuffer.MaxSize / 2), 1);
+                            speechResult = MetadataToString(metaResult.Transcripts[0]);
                         }
                         else
                         {
-                            speechResult = sttClient.SpeechToText(waveBuffer.ShortBuffer, Convert.ToUInt32(waveBuffer.MaxSize / 2), 16000);
+                            speechResult = sttClient.SpeechToText(waveBuffer.ShortBuffer,
+                                Convert.ToUInt32(waveBuffer.MaxSize / 2));
                         }
 
                         stopwatch.Stop();
@@ -111,10 +92,10 @@ namespace CSharpExamples
                     }
                     waveBuffer.Clear();
                 }
-                catch (Exception ex)
-                {
-                    Console.WriteLine(ex.Message);
-                }
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine(ex.Message);
             }
         }
     }

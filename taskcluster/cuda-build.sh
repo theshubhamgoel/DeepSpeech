@@ -8,7 +8,6 @@ source ${DS_ROOT_TASK}/DeepSpeech/tf/tc-vars.sh
 
 BAZEL_TARGETS="
 //native_client:libdeepspeech.so
-//native_client:generate_trie
 "
 
 BAZEL_ENV_FLAGS="TF_NEED_CUDA=1 ${TF_CUDA_FLAGS}"
@@ -21,6 +20,6 @@ do_bazel_build
 
 do_deepspeech_binary_build
 
-do_deepspeech_python_build rename_to_gpu
+do_deepspeech_python_build "--cuda"
 
-do_deepspeech_nodejs_build rename_to_gpu
+do_deepspeech_nodejs_build "--cuda"

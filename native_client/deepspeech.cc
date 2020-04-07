@@ -13,7 +13,7 @@
 #include "alphabet.h"
 #include "modelstate.h"
 
-#include "native_client/ds_version.h"
+#include "workspace_status.h"
 
 #ifndef USE_TFLITE
 #include "tfmodelstate.h"
@@ -39,7 +39,7 @@ using std::vector;
 
    The streaming process uses three buffers that are fed eagerly as audio data
    is fed in. The buffers only hold the minimum amount of data needed to do a
-   step in the acoustic model. The three buffers which live in StreamingContext
+   step in the acoustic model. The three buffers which live in StreamingState
    are:
 
    - audio_buffer, used to buffer audio samples until there's enough data to
@@ -60,7 +60,7 @@ using std::vector;
    When batch_buffer is full, we do a single step through the acoustic model
    and accumulate the intermediate decoding state in the DecoderState structure.
 
-   When finishStream() is called, we return the corresponding transcription from
+   When finishStream() is called, we return the corresponding transcript from
    the current decoder state.
 */
 struct StreamingState {
@@ -71,16 +71,17 @@ struct StreamingState {
   vector<float> previous_state_h_;
 
   ModelState* model_;
-  std::unique_ptr<DecoderState> decoder_state_;
+  DecoderState decoder_state_;
 
   StreamingState();
   ~StreamingState();
 
   void feedAudioContent(const short* buffer, unsigned int buffer_size);
-  char* intermediateDecode();
+  char* intermediateDecode() const;
+  Metadata* intermediateDecodeWithMetadata(unsigned int num_results) const;
   void finalizeStream();
   char* finishStream();
-  Metadata* finishStreamWithMetadata();
+  Metadata* finishStreamWithMetadata(unsigned int num_results);
 
   void processAudioWindow(const vector<float>& buf);
   void processMfccWindow(const vector<float>& buf);
@@ -131,23 +132,29 @@ StreamingState::feedAudioContent(const short* buffer,
 }
 
 char*
-StreamingState::intermediateDecode()
+StreamingState::intermediateDecode() const
 {
-  return model_->decode(decoder_state_.get());
+  return model_->decode(decoder_state_);
+}
+
+Metadata*
+StreamingState::intermediateDecodeWithMetadata(unsigned int num_results) const
+{
+  return model_->decode_metadata(decoder_state_, num_results);
 }
 
 char*
 StreamingState::finishStream()
 {
   finalizeStream();
-  return model_->decode(decoder_state_.get());
+  return model_->decode(decoder_state_);
 }
 
 Metadata*
-StreamingState::finishStreamWithMetadata()
+StreamingState::finishStreamWithMetadata(unsigned int num_results)
 {
   finalizeStream();
-  return model_->decode_metadata(decoder_state_.get());
+  return model_->decode_metadata(decoder_state_, num_results);
 }
 
 void
@@ -244,36 +251,31 @@ StreamingState::processBatch(const vector<float>& buf, unsigned int n_steps)
                 previous_state_c_,
                 previous_state_h_);
 
-  const int cutoff_top_n = 40;
-  const double cutoff_prob = 1.0;
-  const size_t num_classes = model_->alphabet_->GetSize() + 1; // +1 for blank
+  const size_t num_classes = model_->alphabet_.GetSize() + 1; // +1 for blank
   const int n_frames = logits.size() / (ModelState::BATCH_SIZE * num_classes);
 
   // Convert logits to double
   vector<double> inputs(logits.begin(), logits.end());
 
-  decoder_next(inputs.data(), 
-               *model_->alphabet_,
-               decoder_state_.get(),
-               n_frames,
-               num_classes,
-               cutoff_prob,
-               cutoff_top_n,
-               model_->beam_width_,
-               model_->scorer_);
+  decoder_state_.next(inputs.data(),
+                      n_frames,
+                      num_classes);
 }
 
 int
 DS_CreateModel(const char* aModelPath,
-               unsigned int aNCep,
-               unsigned int aNContext,
-               const char* aAlphabetConfigPath,
-               unsigned int aBeamWidth,
                ModelState** retval)
 {
   *retval = nullptr;
 
-  DS_PrintVersions();
+  std::cerr << "TensorFlow: " << tf_local_git_version() << std::endl;
+  std::cerr << "DeepSpeech: " << ds_git_version() << std::endl;
+#ifdef __ANDROID__
+  LOGE("TensorFlow: %s", tf_local_git_version());
+  LOGD("TensorFlow: %s", tf_local_git_version());
+  LOGE("DeepSpeech: %s", ds_git_version());
+  LOGD("DeepSpeech: %s", ds_git_version());
+#endif
 
   if (!aModelPath || strlen(aModelPath) < 1) {
     std::cerr << "No model specified, cannot continue." << std::endl;
@@ -293,7 +295,7 @@ DS_CreateModel(const char* aModelPath,
     return DS_ERR_FAIL_CREATE_MODEL;
   }
 
-  int err = model->init(aModelPath, aNCep, aNContext, aAlphabetConfigPath, aBeamWidth);
+  int err = model->init(aModelPath);
   if (err != DS_ERR_OK) {
     return err;
   }
@@ -302,36 +304,67 @@ DS_CreateModel(const char* aModelPath,
   return DS_ERR_OK;
 }
 
+unsigned int
+DS_GetModelBeamWidth(const ModelState* aCtx)
+{
+  return aCtx->beam_width_;
+}
+
+int
+DS_SetModelBeamWidth(ModelState* aCtx, unsigned int aBeamWidth)
+{
+  aCtx->beam_width_ = aBeamWidth;
+  return 0;
+}
+
+int
+DS_GetModelSampleRate(const ModelState* aCtx)
+{
+  return aCtx->sample_rate_;
+}
+
 void
-DS_DestroyModel(ModelState* ctx)
+DS_FreeModel(ModelState* ctx)
 {
   delete ctx;
 }
 
 int
-DS_EnableDecoderWithLM(ModelState* aCtx,
-                       const char* aAlphabetConfigPath,
-                       const char* aLMPath,
-                       const char* aTriePath,
-                       float aLMAlpha,
-                       float aLMBeta)
+DS_EnableExternalScorer(ModelState* aCtx,
+                        const char* aScorerPath)
 {
-  try {
-    aCtx->scorer_ = new Scorer(aLMAlpha, aLMBeta,
-                               aLMPath ? aLMPath : "",
-                               aTriePath ? aTriePath : "",
-                               *aCtx->alphabet_);
-    return DS_ERR_OK;
-  } catch (...) {
-    return DS_ERR_INVALID_LM;
+  aCtx->scorer_.reset(new Scorer());
+  int err = aCtx->scorer_->init(aScorerPath, aCtx->alphabet_);
+  if (err != 0) {
+    return DS_ERR_INVALID_SCORER;
   }
+  return DS_ERR_OK;
 }
 
 int
-DS_SetupStream(ModelState* aCtx,
-               unsigned int aPreAllocFrames,
-               unsigned int aSampleRate,
-               StreamingState** retval)
+DS_DisableExternalScorer(ModelState* aCtx)
+{
+  if (aCtx->scorer_) {
+    aCtx->scorer_.reset();
+    return DS_ERR_OK;
+  }
+  return DS_ERR_SCORER_NOT_ENABLED;
+}
+
+int DS_SetScorerAlphaBeta(ModelState* aCtx,
+                          float aAlpha,
+                          float aBeta)
+{
+  if (aCtx->scorer_) {
+    aCtx->scorer_->reset_params(aAlpha, aBeta);
+    return DS_ERR_OK;
+  }
+  return DS_ERR_SCORER_NOT_ENABLED;
+}
+
+int
+DS_CreateStream(ModelState* aCtx,
+                StreamingState** retval)
 {
   *retval = nullptr;
 
@@ -339,13 +372,6 @@ DS_SetupStream(ModelState* aCtx,
   if (!ctx) {
     std::cerr << "Could not allocate streaming state." << std::endl;
     return DS_ERR_FAIL_CREATE_STREAM;
-  }
-
-  const size_t num_classes = aCtx->alphabet_->GetSize() + 1; // +1 for blank
-
-  // Default initial allocation = 3 seconds.
-  if (aPreAllocFrames == 0) {
-    aPreAllocFrames = 150;
   }
 
   ctx->audio_buffer_.reserve(aCtx->audio_win_len_);
@@ -356,7 +382,14 @@ DS_SetupStream(ModelState* aCtx,
   ctx->previous_state_h_.resize(aCtx->state_size_, 0.f);
   ctx->model_ = aCtx;
 
-  ctx->decoder_state_.reset(decoder_init(*aCtx->alphabet_, num_classes, aCtx->scorer_));
+  const int cutoff_top_n = 40;
+  const double cutoff_prob = 1.0;
+
+  ctx->decoder_state_.init(aCtx->alphabet_,
+                           aCtx->beam_width_,
+                           cutoff_prob,
+                           cutoff_top_n,
+                           aCtx->scorer_);
 
   *retval = ctx.release();
   return DS_ERR_OK;
@@ -371,35 +404,42 @@ DS_FeedAudioContent(StreamingState* aSctx,
 }
 
 char*
-DS_IntermediateDecode(StreamingState* aSctx)
+DS_IntermediateDecode(const StreamingState* aSctx)
 {
   return aSctx->intermediateDecode();
+}
+
+Metadata*
+DS_IntermediateDecodeWithMetadata(const StreamingState* aSctx,
+                                  unsigned int aNumResults)
+{
+  return aSctx->intermediateDecodeWithMetadata(aNumResults);
 }
 
 char*
 DS_FinishStream(StreamingState* aSctx)
 {
   char* str = aSctx->finishStream();
-  DS_DiscardStream(aSctx);
+  DS_FreeStream(aSctx);
   return str;
 }
 
 Metadata*
-DS_FinishStreamWithMetadata(StreamingState* aSctx)
+DS_FinishStreamWithMetadata(StreamingState* aSctx, 
+                            unsigned int aNumResults)
 {
-  Metadata* metadata = aSctx->finishStreamWithMetadata();
-  DS_DiscardStream(aSctx);
-  return metadata;
+  Metadata* result = aSctx->finishStreamWithMetadata(aNumResults);
+  DS_FreeStream(aSctx);
+  return result;
 }
 
 StreamingState*
-SetupStreamAndFeedAudioContent(ModelState* aCtx,
-                               const short* aBuffer,
-                               unsigned int aBufferSize,
-                               unsigned int aSampleRate)
+CreateStreamAndFeedAudioContent(ModelState* aCtx,
+                                const short* aBuffer,
+                                unsigned int aBufferSize)
 {
   StreamingState* ctx;
-  int status = DS_SetupStream(aCtx, 0, aSampleRate, &ctx);
+  int status = DS_CreateStream(aCtx, &ctx);
   if (status != DS_ERR_OK) {
     return nullptr;
   }
@@ -410,10 +450,9 @@ SetupStreamAndFeedAudioContent(ModelState* aCtx,
 char*
 DS_SpeechToText(ModelState* aCtx,
                 const short* aBuffer,
-                unsigned int aBufferSize,
-                unsigned int aSampleRate)
+                unsigned int aBufferSize)
 {
-  StreamingState* ctx = SetupStreamAndFeedAudioContent(aCtx, aBuffer, aBufferSize, aSampleRate);
+  StreamingState* ctx = CreateStreamAndFeedAudioContent(aCtx, aBuffer, aBufferSize);
   return DS_FinishStream(ctx);
 }
 
@@ -421,14 +460,14 @@ Metadata*
 DS_SpeechToTextWithMetadata(ModelState* aCtx,
                             const short* aBuffer,
                             unsigned int aBufferSize,
-                            unsigned int aSampleRate)
+                            unsigned int aNumResults)
 {
-  StreamingState* ctx = SetupStreamAndFeedAudioContent(aCtx, aBuffer, aBufferSize, aSampleRate);
-  return DS_FinishStreamWithMetadata(ctx);
+  StreamingState* ctx = CreateStreamAndFeedAudioContent(aCtx, aBuffer, aBufferSize);
+  return DS_FinishStreamWithMetadata(ctx, aNumResults);
 }
 
 void
-DS_DiscardStream(StreamingState* aSctx)
+DS_FreeStream(StreamingState* aSctx)
 {
   delete aSctx;
 }
@@ -437,11 +476,16 @@ void
 DS_FreeMetadata(Metadata* m)
 {
   if (m) {
-    for (int i = 0; i < m->num_items; ++i) {
-      free(m->items[i].character);
+    for (int i = 0; i < m->num_transcripts; ++i) {
+      for (int j = 0; j < m->transcripts[i].num_tokens; ++j) {
+        free((void*)m->transcripts[i].tokens[j].text);
+      }
+
+      free((void*)m->transcripts[i].tokens);
     }
-    delete[] m->items;
-    delete m;
+
+    free((void*)m->transcripts);
+    free(m);
   }
 }
 
@@ -451,14 +495,46 @@ DS_FreeString(char* str)
   free(str);
 }
 
-void
-DS_PrintVersions() {
-  std::cerr << "TensorFlow: " << tf_local_git_version() << std::endl;
-  std::cerr << "DeepSpeech: " << ds_git_version() << std::endl;
-#ifdef __ANDROID__
-  LOGE("TensorFlow: %s", tf_local_git_version());
-  LOGD("TensorFlow: %s", tf_local_git_version());
-  LOGE("DeepSpeech: %s", ds_git_version());
-  LOGD("DeepSpeech: %s", ds_git_version());
-#endif
+char*
+DS_Version()
+{
+  return strdup(ds_version());
+}
+
+char*
+DS_ErrorCodeToErrorMessage(int aErrorCode)
+{
+  switch(aErrorCode)
+  {
+    case DS_ERR_OK:
+      return strdup("No error.");
+    case DS_ERR_NO_MODEL:
+      return strdup("Missing model information.");
+    case DS_ERR_INVALID_ALPHABET:
+      return strdup("Invalid alphabet embedded in model. (Data corruption?)");
+    case DS_ERR_INVALID_SHAPE:
+      return strdup("Invalid model shape.");
+    case DS_ERR_INVALID_SCORER:
+      return strdup("Invalid scorer file.");
+    case DS_ERR_FAIL_INIT_MMAP:
+      return strdup("Failed to initialize memory mapped model.");
+    case DS_ERR_FAIL_INIT_SESS:
+      return strdup("Failed to initialize the session.");
+    case DS_ERR_FAIL_INTERPRETER:
+      return strdup("Interpreter failed.");
+    case DS_ERR_FAIL_RUN_SESS:
+      return strdup("Failed to run the session.");
+    case DS_ERR_FAIL_CREATE_STREAM:
+      return strdup("Error creating the stream.");
+    case DS_ERR_FAIL_READ_PROTOBUF:
+      return strdup("Error reading the proto buffer model file.");
+    case DS_ERR_FAIL_CREATE_SESS:
+      return strdup("Failed to create session.");
+    case DS_ERR_MODEL_INCOMPATIBLE:
+      return strdup("Incompatible model.");
+    case DS_ERR_SCORER_NOT_ENABLED:
+      return strdup("External scorer is not enabled.");
+    default:
+      return strdup("Unknown error, please make sure you are using the correct native binary.");
+  }
 }

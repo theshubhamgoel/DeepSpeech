@@ -11,6 +11,9 @@ if [ -z "${nodever}" ]; then
     exit 1
 fi;
 
+bitrate=$2
+set_ldc_sample_filename "${bitrate}"
+
 model_source=${DEEPSPEECH_PROD_MODEL}
 model_name=$(basename "${model_source}")
 
@@ -21,10 +24,15 @@ download_data
 
 node --version
 npm --version
-npm install ${DEEPSPEECH_NODEJS}/deepspeech-${DS_VERSION}.tgz
 
-export PATH=$HOME/node_modules/.bin/:$PATH
+NODE_ROOT="${DS_ROOT_TASK}/ds-test/"
+NODE_CACHE="${DS_ROOT_TASK}/ds-test.cache/"
+export NODE_PATH="${NODE_ROOT}/node_modules/"
+export PATH="${NODE_ROOT}:${NODE_PATH}/.bin/:$PATH"
+
+deepspeech_npm_url=$(get_dep_npm_pkg_url)
+npm install --prefix ${NODE_ROOT} --cache ${NODE_CACHE} ${deepspeech_npm_url}
 
 check_runtime_nodejs
 
-run_prod_inference_tests
+run_prod_inference_tests "${bitrate}"

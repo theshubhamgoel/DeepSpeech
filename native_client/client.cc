@@ -33,12 +33,6 @@
 #include "deepspeech.h"
 #include "args.h"
 
-#define N_CEP 26
-#define N_CONTEXT 9
-#define BEAM_WIDTH 500
-#define LM_ALPHA 0.75f
-#define LM_BETA 1.85f
-
 typedef struct {
   const char* string;
   double cpu_time_overall;
@@ -50,29 +44,136 @@ struct meta_word {
   float duration;
 };
 
-char* metadataToString(Metadata* metadata);
-std::vector<meta_word> WordsFromMetadata(Metadata* metadata);
-char* JSONOutput(Metadata* metadata);
+char*
+CandidateTranscriptToString(const CandidateTranscript* transcript)
+{
+  std::string retval = "";
+  for (int i = 0; i < transcript->num_tokens; i++) {
+    const TokenMetadata& token = transcript->tokens[i];
+    retval += token.text;
+  }
+  return strdup(retval.c_str());
+}
+
+std::vector<meta_word>
+CandidateTranscriptToWords(const CandidateTranscript* transcript)
+{
+  std::vector<meta_word> word_list;
+
+  std::string word = "";
+  float word_start_time = 0;
+
+  // Loop through each token
+  for (int i = 0; i < transcript->num_tokens; i++) {
+    const TokenMetadata& token = transcript->tokens[i];
+
+    // Append token to word if it's not a space
+    if (strcmp(token.text, u8" ") != 0) {
+      // Log the start time of the new word
+      if (word.length() == 0) {
+        word_start_time = token.start_time;
+      }
+      word.append(token.text);
+    }
+
+    // Word boundary is either a space or the last token in the array
+    if (strcmp(token.text, u8" ") == 0 || i == transcript->num_tokens-1) {
+      float word_duration = token.start_time - word_start_time;
+
+      if (word_duration < 0) {
+        word_duration = 0;
+      }
+
+      meta_word w;
+      w.word = word;
+      w.start_time = word_start_time;
+      w.duration = word_duration;
+
+      word_list.push_back(w);
+
+      // Reset
+      word = "";
+      word_start_time = 0;
+    }
+  }
+
+  return word_list;
+}
+
+std::string
+CandidateTranscriptToJSON(const CandidateTranscript *transcript)
+{
+  std::ostringstream out_string;
+
+  std::vector<meta_word> words = CandidateTranscriptToWords(transcript);
+
+  out_string << R"("metadata":{"confidence":)" << transcript->confidence << R"(},"words":[)";
+
+  for (int i = 0; i < words.size(); i++) {
+    meta_word w = words[i];
+    out_string << R"({"word":")" << w.word << R"(","time":)" << w.start_time << R"(,"duration":)" << w.duration << "}";
+
+    if (i < words.size() - 1) {
+      out_string << ",";
+    }
+  }
+
+  out_string << "]";
+
+  return out_string.str();
+}
+
+char*
+MetadataToJSON(Metadata* result)
+{
+  std::ostringstream out_string;
+  out_string << "{\n";
+
+  for (int j=0; j < result->num_transcripts; ++j) {
+    const CandidateTranscript *transcript = &result->transcripts[j];
+
+    if (j == 0) {
+      out_string << CandidateTranscriptToJSON(transcript);
+
+      if (result->num_transcripts > 1) {
+        out_string << ",\n" << R"("alternatives")" << ":[\n";
+      }
+    } else {
+      out_string << "{" << CandidateTranscriptToJSON(transcript) << "}";
+
+      if (j < result->num_transcripts - 1) {
+        out_string << ",\n";
+      } else {
+        out_string << "\n]";
+      }
+    }
+  }
+  
+  out_string << "\n}\n";
+
+  return strdup(out_string.str().c_str());
+}
 
 ds_result
 LocalDsSTT(ModelState* aCtx, const short* aBuffer, size_t aBufferSize,
-           int aSampleRate, bool extended_output, bool json_output)
+           bool extended_output, bool json_output)
 {
   ds_result res = {0};
 
   clock_t ds_start_time = clock();
 
+  // sphinx-doc: c_ref_inference_start
   if (extended_output) {
-    Metadata *metadata = DS_SpeechToTextWithMetadata(aCtx, aBuffer, aBufferSize, aSampleRate);
-    res.string = metadataToString(metadata);
-    DS_FreeMetadata(metadata);
+    Metadata *result = DS_SpeechToTextWithMetadata(aCtx, aBuffer, aBufferSize, 1);
+    res.string = CandidateTranscriptToString(&result->transcripts[0]);
+    DS_FreeMetadata(result);
   } else if (json_output) {
-    Metadata *metadata = DS_SpeechToTextWithMetadata(aCtx, aBuffer, aBufferSize, aSampleRate);
-    res.string = JSONOutput(metadata);
-    DS_FreeMetadata(metadata);
+    Metadata *result = DS_SpeechToTextWithMetadata(aCtx, aBuffer, aBufferSize, json_candidate_transcripts);
+    res.string = MetadataToJSON(result);
+    DS_FreeMetadata(result);
   } else if (stream_size > 0) {
     StreamingState* ctx;
-    int status = DS_SetupStream(aCtx, 0, aSampleRate, &ctx);
+    int status = DS_CreateStream(aCtx, &ctx);
     if (status != DS_ERR_OK) {
       res.string = strdup("");
       return res;
@@ -96,8 +197,9 @@ LocalDsSTT(ModelState* aCtx, const short* aBuffer, size_t aBufferSize,
     }
     res.string = DS_FinishStream(ctx);
   } else {
-    res.string = DS_SpeechToText(aCtx, aBuffer, aBufferSize, aSampleRate);
+    res.string = DS_SpeechToText(aCtx, aBuffer, aBufferSize);
   }
+  // sphinx-doc: c_ref_inference_stop
 
   clock_t ds_end_infer = clock();
 
@@ -110,11 +212,10 @@ LocalDsSTT(ModelState* aCtx, const short* aBuffer, size_t aBufferSize,
 typedef struct {
   char*  buffer;
   size_t buffer_size;
-  int    sample_rate;
 } ds_audio_buffer;
 
 ds_audio_buffer
-GetAudioBuffer(const char* path)
+GetAudioBuffer(const char* path, int desired_sample_rate)
 {
   ds_audio_buffer res = {0};
 
@@ -124,7 +225,7 @@ GetAudioBuffer(const char* path)
 
   // Resample/reformat the audio so we can pass it through the MFCC functions
   sox_signalinfo_t target_signal = {
-      16000, // Rate
+      static_cast<sox_rate_t>(desired_sample_rate), // Rate
       1, // Channels
       16, // Precision
       SOX_UNSPEC, // Length
@@ -161,10 +262,10 @@ GetAudioBuffer(const char* path)
 
   assert(output);
 
-  res.sample_rate = (int)output->signal.rate;
-
-  if ((int)input->signal.rate < 16000) {
-    fprintf(stderr, "Warning: original sample rate (%d) is lower than 16kHz. Up-sampling might produce erratic speech recognition.\n", (int)input->signal.rate);
+  if ((int)input->signal.rate < desired_sample_rate) {
+    fprintf(stderr, "Warning: original sample rate (%d) is lower than %dkHz. "
+                    "Up-sampling might produce erratic speech recognition.\n",
+                    desired_sample_rate, (int)input->signal.rate);
   }
 
   // Setup the effects chain to decode/resample
@@ -210,7 +311,7 @@ GetAudioBuffer(const char* path)
 #endif // NO_SOX
 
 #ifdef NO_SOX
-  // FIXME: Hack and support only 16kHz mono 16-bits PCM
+  // FIXME: Hack and support only mono 16-bits PCM with standard SoX header
   FILE* wave = fopen(path, "r");
 
   size_t rv;
@@ -229,12 +330,12 @@ GetAudioBuffer(const char* path)
 
   assert(audio_format == 1); // 1 is PCM
   assert(num_channels == 1); // MONO
-  assert(sample_rate == 16000); // 16000 Hz
+  assert(sample_rate == desired_sample_rate); // at desired sample rate
   assert(bits_per_sample == 16); // 16 bits per sample
 
   fprintf(stderr, "audio_format=%d\n", audio_format);
   fprintf(stderr, "num_channels=%d\n", num_channels);
-  fprintf(stderr, "sample_rate=%d\n", sample_rate);
+  fprintf(stderr, "sample_rate=%d (desired=%d)\n", sample_rate, desired_sample_rate);
   fprintf(stderr, "bits_per_sample=%d\n", bits_per_sample);
 
   fseek(wave, 40, SEEK_SET); rv = fread(&res.buffer_size, 4, 1, wave);
@@ -262,7 +363,7 @@ GetAudioBuffer(const char* path)
 void
 ProcessFile(ModelState* context, const char* path, bool show_times)
 {
-  ds_audio_buffer audio = GetAudioBuffer(path);
+  ds_audio_buffer audio = GetAudioBuffer(path, DS_GetModelSampleRate(context));
 
   // Pass audio to DeepSpeech
   // We take half of buffer_size because buffer is a char* while
@@ -270,7 +371,6 @@ ProcessFile(ModelState* context, const char* path, bool show_times)
   ds_result result = LocalDsSTT(context,
                                 (const short*)audio.buffer,
                                 audio.buffer_size / 2,
-                                audio.sample_rate,
                                 extended_metadata,
                                 json_output);
   free(audio.buffer);
@@ -286,88 +386,6 @@ ProcessFile(ModelState* context, const char* path, bool show_times)
   }
 }
 
-char*
-metadataToString(Metadata* metadata)
-{
-  std::string retval = "";
-  for (int i = 0; i < metadata->num_items; i++) {
-    MetadataItem item = metadata->items[i];
-    retval += item.character;
-  }
-  return strdup(retval.c_str());
-}
-
-std::vector<meta_word>
-WordsFromMetadata(Metadata* metadata)
-{
-  std::vector<meta_word> word_list;
-
-  std::string word = "";
-  float word_start_time = 0;
-
-  // Loop through each character
-  for (int i = 0; i < metadata->num_items; i++) {
-    MetadataItem item = metadata->items[i];
-
-    // Append character to word if it's not a space
-    if (strcmp(item.character, " ") != 0 
-        && strcmp(item.character, u8"　") != 0) {
-      word.append(item.character);
-    }
-
-    // Word boundary is either a space or the last character in the array
-    if (strcmp(item.character, " ") == 0
-        || strcmp(item.character, u8" ") == 0
-        || i == metadata->num_items-1) {
-
-      float word_duration = item.start_time - word_start_time;
-
-      if (word_duration < 0) {
-        word_duration = 0;
-      }
-
-      meta_word w;
-      w.word = word;
-      w.start_time = word_start_time;
-      w.duration = word_duration;
-
-      word_list.push_back(w);
-
-      // Reset
-      word = "";
-      word_start_time = 0;
-    } else {
-      if (word.length() == 1) {
-        word_start_time = item.start_time; // Log the start time of the new word
-      }
-    }
-  }
-
-  return word_list;
-}
-
-char* 
-JSONOutput(Metadata* metadata)
-{
-  std::vector<meta_word> words = WordsFromMetadata(metadata);
-
-  std::ostringstream out_string;
-  out_string << R"({"metadata":{"confidence":)" << metadata->probability << R"(},"words":[)";
-
-  for (int i = 0; i < words.size(); i++) {
-    meta_word w = words[i];
-    out_string << R"({"word":")" << w.word << R"(","time":)" << w.start_time << R"(,"duration":)" << w.duration << "}";
-
-    if (i < words.size() - 1) {
-      out_string << ",";
-    }
-  }
-  
-  out_string << "]}\n";
-
-  return strdup(out_string.str().c_str());
-}
-
 int
 main(int argc, char **argv)
 {
@@ -377,24 +395,36 @@ main(int argc, char **argv)
 
   // Initialise DeepSpeech
   ModelState* ctx;
-  int status = DS_CreateModel(model, N_CEP, N_CONTEXT, alphabet, BEAM_WIDTH, &ctx);
+  // sphinx-doc: c_ref_model_start
+  int status = DS_CreateModel(model, &ctx);
   if (status != 0) {
     fprintf(stderr, "Could not create model.\n");
     return 1;
   }
 
-  if (lm && (trie || load_without_trie)) {
-    int status = DS_EnableDecoderWithLM(ctx,
-                                        alphabet,
-                                        lm,
-                                        trie,
-                                        LM_ALPHA,
-                                        LM_BETA);
+  if (set_beamwidth) {
+    status = DS_SetModelBeamWidth(ctx, beam_width);
     if (status != 0) {
-      fprintf(stderr, "Could not enable CTC decoder with LM.\n");
+      fprintf(stderr, "Could not set model beam width.\n");
       return 1;
     }
   }
+
+  if (scorer) {
+    status = DS_EnableExternalScorer(ctx, scorer);
+    if (status != 0) {
+      fprintf(stderr, "Could not enable external scorer.\n");
+      return 1;
+    }
+    if (set_alphabeta) {
+      status = DS_SetScorerAlphaBeta(ctx, lm_alpha, lm_beta);
+      if (status != 0) {
+        fprintf(stderr, "Error setting scorer alpha and beta.\n");
+        return 1;
+      }
+    }
+  }
+  // sphinx-doc: c_ref_model_stop
 
 #ifndef NO_SOX
   // Initialise SOX
@@ -449,7 +479,7 @@ main(int argc, char **argv)
   sox_quit();
 #endif // NO_SOX
 
-  DS_DestroyModel(ctx);
+  DS_FreeModel(ctx);
 
   return 0;
 }

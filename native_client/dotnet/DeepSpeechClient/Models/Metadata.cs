@@ -6,12 +6,8 @@
     public class Metadata
     {
         /// <summary>
-        /// Approximated probability (confidence value) for this transcription.
+        /// List of candidate transcripts.
         /// </summary>
-        public double Probability { get; set; }
-        /// <summary>
-        /// List of metada items containing char, timespet, and time offset.
-        /// </summary>
-        public MetadataItem[] Items { get; set; }
+        public CandidateTranscript[] Transcripts { get; set; }
     }
 }

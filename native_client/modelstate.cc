@@ -7,76 +7,69 @@
 using std::vector;
 
 ModelState::ModelState()
-  : alphabet_(nullptr)
-  , scorer_(nullptr)
-  , beam_width_(-1)
+  : beam_width_(-1)
   , n_steps_(-1)
   , n_context_(-1)
   , n_features_(-1)
   , mfcc_feats_per_timestep_(-1)
-  , sample_rate_(DEFAULT_SAMPLE_RATE)
-  , audio_win_len_(DEFAULT_WINDOW_LENGTH)
-  , audio_win_step_(DEFAULT_WINDOW_STEP)
+  , sample_rate_(-1)
+  , audio_win_len_(-1)
+  , audio_win_step_(-1)
   , state_size_(-1)
 {
 }
 
 ModelState::~ModelState()
 {
-  delete scorer_;
-  delete alphabet_;
 }
 
 int
-ModelState::init(const char* model_path,
-                 unsigned int n_features,
-                 unsigned int n_context,
-                 const char* alphabet_path,
-                 unsigned int beam_width)
+ModelState::init(const char* model_path)
 {
-  n_features_ = n_features;
-  n_context_ = n_context;
-  alphabet_ = new Alphabet(alphabet_path);
-  beam_width_ = beam_width;
   return DS_ERR_OK;
 }
 
-vector<Output>
-ModelState::decode_raw(DecoderState* state)
-{
-  vector<Output> out = decoder_decode(state, *alphabet_, beam_width_, scorer_);
-  return out;
-}
-
 char*
-ModelState::decode(DecoderState* state)
+ModelState::decode(const DecoderState& state) const
 {
-  vector<Output> out = decode_raw(state);
-  return strdup(alphabet_->LabelsToString(out[0].tokens).c_str());
+  vector<Output> out = state.decode();
+  return strdup(alphabet_.LabelsToString(out[0].tokens).c_str());
 }
 
 Metadata*
-ModelState::decode_metadata(DecoderState* state)
+ModelState::decode_metadata(const DecoderState& state, 
+                            size_t num_results)
 {
-  vector<Output> out = decode_raw(state);
+  vector<Output> out = state.decode(num_results);
+  unsigned int num_returned = out.size();
 
-  std::unique_ptr<Metadata> metadata(new Metadata());
-  metadata->num_items = out[0].tokens.size();
-  metadata->probability = out[0].probability;
+  CandidateTranscript* transcripts = (CandidateTranscript*)malloc(sizeof(CandidateTranscript)*num_returned);
 
-  std::unique_ptr<MetadataItem[]> items(new MetadataItem[metadata->num_items]());
+  for (int i = 0; i < num_returned; ++i) {
+    TokenMetadata* tokens = (TokenMetadata*)malloc(sizeof(TokenMetadata)*out[i].tokens.size());
 
-  // Loop through each character
-  for (int i = 0; i < out[0].tokens.size(); ++i) {
-    items[i].character = strdup(alphabet_->StringFromLabel(out[0].tokens[i]).c_str());
-    items[i].timestep = out[0].timesteps[i];
-    items[i].start_time = out[0].timesteps[i] * ((float)audio_win_step_ / sample_rate_);
-
-    if (items[i].start_time < 0) {
-      items[i].start_time = 0;
+    for (int j = 0; j < out[i].tokens.size(); ++j) {
+      TokenMetadata token {
+        strdup(alphabet_.StringFromLabel(out[i].tokens[j]).c_str()),   // text
+        static_cast<unsigned int>(out[i].timesteps[j]),                // timestep
+        out[i].timesteps[j] * ((float)audio_win_step_ / sample_rate_), // start_time
+      };
+      memcpy(&tokens[j], &token, sizeof(TokenMetadata));
     }
+
+    CandidateTranscript transcript {
+      tokens,                                          // tokens
+      static_cast<unsigned int>(out[i].tokens.size()), // num_tokens
+      out[i].confidence,                               // confidence
+    };
+    memcpy(&transcripts[i], &transcript, sizeof(CandidateTranscript));
   }
 
-  metadata->items = items.release();
-  return metadata.release();
+  Metadata* ret = (Metadata*)malloc(sizeof(Metadata));
+  Metadata metadata {
+    transcripts,  // transcripts
+    num_returned, // num_transcripts
+  };
+  memcpy(ret, &metadata, sizeof(Metadata));
+  return ret;
 }

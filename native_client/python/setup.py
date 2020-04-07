@@ -64,12 +64,12 @@ def main():
                        include_dirs=[numpy_include, '../'],
                        library_dirs=list(map(lambda x: x.strip(), lib_dirs_split(os.getenv('MODEL_LDFLAGS', '')))),
                        libraries=list(map(lambda x: x.strip(), libs_split(os.getenv('MODEL_LIBS', '')))),
-                       swig_opts=['-c++', '-keyword', '-builtin'])
+                       swig_opts=['-c++', '-keyword'])
 
     setup(name=project_name,
           description='A library for running inference on a DeepSpeech model',
-          long_description=read('../../README.md'),
-          long_description_content_type='text/markdown; charset=UTF-8',
+          long_description=read('README.rst'),
+          long_description_content_type='text/x-rst; charset=UTF-8',
           author='Mozilla',
           version=project_version,
           package_dir={'deepspeech': '.'},
